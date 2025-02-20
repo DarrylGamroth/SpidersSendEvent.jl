@@ -2,11 +2,6 @@
 ENV["STATUS_URI"] = "aeron:udp?endpoint=localhost:40123"
 ENV["STATUS_STREAM_ID"] = "1"
 
-ENV["CONTROL_URI"] = "aeron:udp?endpoint=localhost:40123"
-ENV["CONTROL_STREAM_ID"] = "2"
-
-ENV["BLOCK_ID"] = "1023"
-
 module SpidersSendEvent
 
 include("uvclockgetttime.jl")
@@ -252,14 +247,14 @@ function main(ARGS)
     return 0
 end
 
-function message_handler(messages, buffer, header)
-    message = Event.EventMessageDecoder(buffer, offset, Event.MessageHeader(buffer))
-    spiders_header = Event.header(message)
-    correlation_id = Event.correlationId(spiders_header)
-    println("Received message: $message\n")
+# function message_handler(messages, buffer, header)
+#     message = Event.EventMessageDecoder(buffer, offset, Event.MessageHeader(buffer))
+#     spiders_header = Event.header(message)
+#     correlation_id = Event.correlationId(spiders_header)
+#     println("Received message: $message\n")
 
-    nothing
-end
+#     nothing
+# end
 
 end
 
