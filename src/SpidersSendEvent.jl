@@ -4,11 +4,10 @@ ENV["STATUS_STREAM_ID"] = "1"
 
 module SpidersSendEvent
 
-include("uvclockgetttime.jl")
-using .Clocks
 
 using Aeron
 using ArgParse
+using Clocks
 using Downloads
 using EnumX
 using FITSIO
@@ -22,6 +21,7 @@ const CONNECTION_TIMEOUT_NS = 1_000_000_000
 
 const BLOCK_ID = parse(Int, get(ENV, "BLOCK_ID", "1023"))
 const id_gen = SnowflakeIdGenerator(BLOCK_ID)
+const clock = EpochClock()
 
 function is_valid_uri(url::AbstractString)
     try
@@ -68,7 +68,7 @@ function try_claim(p, length, max_attempts=10)
 end
 
 function encode(tag::AbstractString, event::Pair{T,S}) where {T<:AbstractString,S}
-    timestamp = clock_gettime(uv_clock_id.REALTIME)
+    timestamp = time_nanos(clock)
     if Sbe.is_sbe_message(S)
         len = Sbe.sbe_decoded_length(event.second)
     else
@@ -86,7 +86,7 @@ function encode(tag::AbstractString, event::Pair{T,S}) where {T<:AbstractString,
 end
 
 function encode(tag::AbstractString, event::Pair{T,S}) where {T<:AbstractString,S<:URI}
-    timestamp = clock_gettime(uv_clock_id.REALTIME)
+    timestamp = time_nanos(clock)
     buf = zeros(UInt8, 128)
     encoder = Tensor.TensorMessageEncoder(buf, Tensor.MessageHeader(buf))
     header = Tensor.header(encoder)
