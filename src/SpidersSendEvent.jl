@@ -1,9 +1,4 @@
-#! /usr/bin/env julia
-ENV["STATUS_URI"] = "aeron:udp?endpoint=localhost:40123"
-ENV["STATUS_STREAM_ID"] = "1"
-
 module SpidersSendEvent
-
 
 using Aeron
 using ArgParse
@@ -215,6 +210,10 @@ function main(ARGS)
     # messages = ntuple(i -> encode(tag, kwargs[i]), length(kwargs))
 
     messages = Vector{UInt8}[]
+    if kwargs === nothing
+        return 0
+    end
+
     for arg in kwargs
         push!(messages, encode(tag, arg))
     end
@@ -257,8 +256,3 @@ end
 # end
 
 end
-
-using .SpidersSendEvent
-const main = SpidersSendEvent.main
-@isdefined(var"@main") ? (@main) : exit(main(ARGS))
-
