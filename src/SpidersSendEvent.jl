@@ -62,7 +62,7 @@ function try_claim(p, length, max_attempts=10)
     @error "Try claim failed"
 end
 
-function encode(tag::AbstractString, event::Pair{T,S}) where {T<:AbstractString,S}
+function encode(tag::AbstractString, @nospecialize event::Pair{T,S}) where {T<:AbstractString,S}
     timestamp = time_nanos(clock)
     if Sbe.is_sbe_message(S)
         len = Sbe.sbe_decoded_length(event.second)
@@ -80,7 +80,7 @@ function encode(tag::AbstractString, event::Pair{T,S}) where {T<:AbstractString,
     convert(AbstractVector{UInt8}, encoder)
 end
 
-function encode(tag::AbstractString, event::Pair{T,S}) where {T<:AbstractString,S<:URI}
+function encode(tag::AbstractString, @nospecialize event::Pair{T,S}) where {T<:AbstractString,S<:URI}
     timestamp = time_nanos(clock)
     buf = zeros(UInt8, 128)
     encoder = Tensor.TensorMessageEncoder(buf, Tensor.MessageHeader(buf))
@@ -207,8 +207,6 @@ function main(ARGS)
 
     kwargs = parse_key_values(key_values)
 
-    # messages = ntuple(i -> encode(tag, kwargs[i]), length(kwargs))
-
     messages = Vector{UInt8}[]
     if kwargs === nothing
         return 0
@@ -254,5 +252,8 @@ end
 
 #     nothing
 # end
+
+precompile(parse_key_values, (Vector{String},))
+precompile(main, (Vector{String},))
 
 end
