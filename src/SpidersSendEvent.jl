@@ -350,7 +350,6 @@ function (@main)(ARGS)
                     sleep(0.1)
                 end
 
-                @info "Sending $(length(messages)) messages"
                 offer(p, messages)
             finally
                 close(p)
