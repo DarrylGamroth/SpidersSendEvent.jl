@@ -15,8 +15,8 @@ export main
 const CONNECTION_TIMEOUT_NS = 1_000_000_000
 
 const BLOCK_ID = parse(Int, get(ENV, "BLOCK_ID", "1023"))
-const id_gen = SnowflakeIdGenerator(BLOCK_ID)
-const clock = EpochClock()
+const clock = CachedEpochClock()
+const id_gen = SnowflakeIdGenerator(BLOCK_ID, clock)
 
 function is_valid_uri(url::AbstractString)
     try
@@ -27,14 +27,16 @@ function is_valid_uri(url::AbstractString)
     end
 end
 
-function offer(p, buf, max_attempts=10)
+function offer(p, bufs, max_attempts=10)
     attempts = max_attempts
     while attempts > 0
-        result = Aeron.offer(p, buf)
+        result = Aeron.offer(p, bufs)
         if result > 0
             return
         elseif result in (Aeron.PUBLICATION_BACK_PRESSURED, Aeron.PUBLICATION_ADMIN_ACTION)
             continue
+        elseif result == Aeron.PUBLICATION_NOT_CONNECTED
+            return
         elseif result == Aeron.PUBLICATION_ERROR
             @error "Publication error"
             Aeron.throwerror()
@@ -45,50 +47,34 @@ function offer(p, buf, max_attempts=10)
     @error "Offer failed"
 end
 
-function try_claim(p, length, max_attempts=10)
-    attempts = max_attempts
-    while attempts > 0
-        claim, result = Aeron.try_claim(p, length)
-        if result > 0
-            return claim
-        elseif result in (Aeron.PUBLICATION_BACK_PRESSURED, Aeron.PUBLICATION_ADMIN_ACTION)
-            continue
-        elseif result == Aeron.PUBLICATION_ERROR
-            Aeron.throwerror()
-            return
-        end
-        attempts -= 1
-    end
-    @error "Try claim failed"
+function myencode(tag::AbstractString, @nospecialize event::Pair{K,V}) where {K<:AbstractString,V}
+    data = event.second
+    buf = zeros(UInt8, 128 + sizeof(data))
+    encoder = SpidersMessageCodecs.EventMessageEncoder(buf)
+    header = SpidersMessageCodecs.header(encoder)
+    SpidersMessageCodecs.timestampNs!(header, time_nanos(clock))
+    SpidersMessageCodecs.correlationId!(header, next_id(id_gen))
+    SpidersMessageCodecs.tag!(header, tag)
+    SpidersMessageCodecs.key!(encoder, event.first)
+    SpidersMessageCodecs.encode(encoder, data)
+
+    convert(AbstractArray{UInt8}, encoder)
 end
 
-function encode(tag::AbstractString, @nospecialize event::Pair{T,S}) where {T<:AbstractString,S}
-    timestamp = time_nanos(clock)
-    if Sbe.is_sbe_message(S)
-        len = Sbe.sbe_decoded_length(event.second)
-    else
-        len = sizeof(S)
-    end
-    buf = zeros(UInt8, 128 + len)
-    encoder = Event.EventMessageEncoder(buf, Event.MessageHeader(buf))
-    header = Event.header(encoder)
-    Event.timestampNs!(header, timestamp)
-    Event.correlationId!(header, next_id(id_gen))
-    Event.tag!(String, header, tag)
+function myencode(tag::AbstractString, @nospecialize event::Pair{K,V}) where {K<:AbstractString,V<:AbstractArray}
+    data = event.second
+    buf = zeros(UInt8, 128 + ndims(data) * sizeof(Int32) + sizeof(data))
+    encoder = SpidersMessageCodecs.TensorMessageEncoder(buf)
+    header = SpidersMessageCodecs.header(encoder)
+    SpidersMessageCodecs.timestampNs!(header, time_nanos(clock))
+    SpidersMessageCodecs.correlationId!(header, next_id(id_gen))
+    SpidersMessageCodecs.tag!(header, tag)
+    SpidersMessageCodecs.encode(encoder, data)
 
-    encoder(event...)
-    convert(AbstractVector{UInt8}, encoder)
+    myencode(tag, event.first => encoder)
 end
 
-function encode(tag::AbstractString, @nospecialize event::Pair{T,S}) where {T<:AbstractString,S<:URI}
-    timestamp = time_nanos(clock)
-    buf = zeros(UInt8, 128)
-    encoder = Tensor.TensorMessageEncoder(buf, Tensor.MessageHeader(buf))
-    header = Tensor.header(encoder)
-    Tensor.timestampNs!(header, timestamp)
-    Tensor.correlationId!(header, next_id(id_gen))
-    Tensor.tag!(String, header, tag)
-
+function myencode(tag::AbstractString, @nospecialize event::Pair{K,V}) where {K<:AbstractString,V<:URI}
     uri = event.second
 
     if endswith(uri.uri, r"\.fits?(.gz)?")
@@ -103,12 +89,11 @@ function encode(tag::AbstractString, @nospecialize event::Pair{T,S}) where {T<:A
         io = IOBuffer()
         Downloads.download(uri.uri, io)
         data = take!(io)
+    else
+        error("Unsupported URI scheme: $(uri.scheme)")
     end
 
-    resize!(buf, 128 + ndims(data) * sizeof(Int32) + sizeof(data))
-
-    encoder(data)
-    encode(tag, event.first => encoder)
+    myencode(tag, event.first => data)
 end
 
 function parse_key_values(key_values)
@@ -157,10 +142,12 @@ function parse_key_values(key_values)
                 error("multiple '=' delimiters encountered in single argument")
             end
         end
+        return kwargs
     end
+    return nothing
 end
 
-function main(ARGS)
+function (@main)(ARGS)
     s = ArgParseSettings()
     @add_arg_table! s begin
         "--aerondir"
@@ -170,21 +157,13 @@ function main(ARGS)
         "--uri"
         help = "Destination URI for publications"
         arg_type = String
-        required = !haskey(ENV, "CONTROL_URI")
+        required = !haskey(ENV, "STREAM_URI")
         "--stream"
         help = "Stream ID for publications"
         arg_type = Int
-        required = !haskey(ENV, "CONTROL_STREAM_ID")
-        "--status-uri"
-        help = "SPIDERS Status URI"
-        arg_type = String
-        required = !haskey(ENV, "STATUS_URI")
-        "--status-stream"
-        help = "SPIDERS Status Stream ID"
-        arg_type = Int
-        required = !haskey(ENV, "STATUS_STREAM_ID")
+        required = !haskey(ENV, "STREAM_ID")
         "--tag"
-        help = "SPIDERS Event Tag"
+        help = "SPIDERS Message Tag"
         arg_type = String
         required = true
         "key-values"
@@ -198,62 +177,66 @@ function main(ARGS)
     end
 
     aerondir = get(ENV, "AERON_DIR", parsed_args["aerondir"])
-    uri = get(ENV, "CONTROL_URI", parsed_args["uri"])
-    stream = parse(Int, get(ENV, "CONTROL_STREAM_ID", string(parsed_args["stream"])))
-    status_uri = get(ENV, "STATUS_URI", parsed_args["status-uri"])
-    status_stream = parse(Int, get(ENV, "STATUS_STREAM_ID", string(parsed_args["status-stream"])))
+    uri = get(ENV, "STREAM_URI", parsed_args["uri"])
+    stream = parse(Int, get(ENV, "STREAM_ID", string(parsed_args["stream"])))
     tag = parsed_args["tag"]
     key_values = parsed_args["key-values"]
 
-    kwargs = parse_key_values(key_values)
+    fetch!(clock, EpochClock())
 
-    messages = Vector{UInt8}[]
-    if kwargs === nothing
+    kwargs = parse_key_values(key_values)
+    if isnothing(kwargs)
         return 0
     end
 
+    messages = Vector{UInt8}[]
     for arg in kwargs
-        push!(messages, encode(tag, arg))
+        push!(messages, myencode(tag, arg))
     end
 
-    context = Aeron.Context()
-    if aerondir !== nothing
-        Aeron.aeron_dir!(context, aerondir)
-    end
-
-    client = Aeron.Client(context)
-
-    p = Aeron.add_publication(client, uri, stream)
-    # s = Aeron.add_subscription(client, status_uri, status_stream)
-    # f = Aeron.FragmentHandler(message_handler, messages)
-    # filter = SpidersEventTagFragmentFilter(f, tag)
-    # fa = Aeron.FragmentAssembler(filter)
-
-    # Wait for connection
-    start_time = time_ns()
-    while !Aeron.is_connected(p)
-        if (time_ns() - start_time) > CONNECTION_TIMEOUT_NS
-            @error "Connection timeout"
-            return -1
+    Aeron.Context() do context
+        if aerondir !== nothing
+            Aeron.aeron_dir!(context, aerondir)
         end
-        sleep(0.1)
-    end
 
-    offer(p, messages)
+        Aeron.Client(context) do client
+
+            p = Aeron.add_publication(client, uri, stream)
+
+            # Wait for connection
+            try
+                start_time = time_ns()
+                while !Aeron.is_connected(p)
+                    if (time_ns() - start_time) > CONNECTION_TIMEOUT_NS
+                        @error "Connection timeout"
+                        return -1
+                    end
+                    sleep(0.1)
+                end
+
+                offer(p, messages)
+            finally
+                close(p)
+            end
+        end
+    end
 
     return 0
 end
 
-# function message_handler(messages, buffer, header)
-#     message = Event.EventMessageDecoder(buffer, offset, Event.MessageHeader(buffer))
-#     spiders_header = Event.header(message)
-#     correlation_id = Event.correlationId(spiders_header)
-#     println("Received message: $message\n")
-
-#     nothing
-# end
-
 precompile(parse_key_values, (Vector{String},))
 precompile(main, (Vector{String},))
+precompile(myencode, (String, Pair{SubString{String}, String}))
+precompile(myencode, (String, Pair{SubString{String}, Int}))
+precompile(myencode, (String, Pair{SubString{String}, Float64}))
+precompile(myencode, (String, Pair{SubString{String}, URI}))
+precompile(myencode, (String, Pair{SubString{String}, SpidersMessageCodecs.EventMessageEncoder{Vector{UInt8}, true}}))
+precompile(myencode, (String, Pair{SubString{String}, SpidersMessageCodecs.TensorMessageEncoder{Vector{UInt8}, true}}))
+precompile(is_valid_uri, (String,))
+precompile(offer, (Aeron.Publication, Vector{UInt8}))
+precompile(try_claim, (Aeron.Publication, Int))
+precompile(Aeron.add_publication, (Aeron.Client, String, Int))
+precompile(Aeron.is_connected, (Aeron.Publication,))
+precompile(Aeron.aeron_dir!, (Aeron.Context, String))
 
 end
