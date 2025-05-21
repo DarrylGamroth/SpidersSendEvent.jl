@@ -96,7 +96,21 @@ function encode_event(tag::AbstractString, @nospecialize event::Pair{K,V}) where
     encode_event(tag, event.first => data)
 end
 
+function encode_tensor(tag::AbstractString, @nospecialize event::Pair{K,V}) where {K<:AbstractString,V<:AbstractArray}
+    data = event.second
+    buf = zeros(UInt8, 128 + ndims(data) * sizeof(Int32) + sizeof(data))
+    encoder = SpidersMessageCodecs.TensorMessageEncoder(buf)
+    header = SpidersMessageCodecs.header(encoder)
+    SpidersMessageCodecs.timestampNs!(header, time_nanos(clock))
+    SpidersMessageCodecs.correlationId!(header, next_id(id_gen))
+    SpidersMessageCodecs.tag!(header, tag)
+    SpidersMessageCodecs.encode(encoder, data)
+
+    convert(AbstractArray{UInt8}, encoder)
+end
+
 function encode_tensor(tag::AbstractString, @nospecialize event::Pair{K,V}) where {K<:AbstractString,V<:URI}
+    key = event.first
     uri = event.second
 
     if endswith(uri.uri, r"\.fits?(.gz)?")
@@ -115,15 +129,7 @@ function encode_tensor(tag::AbstractString, @nospecialize event::Pair{K,V}) wher
         error("Unsupported URI scheme: $(uri.scheme)")
     end
 
-    buf = zeros(UInt8, 128 + ndims(data) * sizeof(Int32) + sizeof(data))
-    encoder = SpidersMessageCodecs.TensorMessageEncoder(buf)
-    header = SpidersMessageCodecs.header(encoder)
-    SpidersMessageCodecs.timestampNs!(header, time_nanos(clock))
-    SpidersMessageCodecs.correlationId!(header, next_id(id_gen))
-    SpidersMessageCodecs.tag!(header, tag)
-    SpidersMessageCodecs.encode(encoder, data)
-
-    convert(AbstractArray{UInt8}, encoder)
+    encode_tensor(tag, event.first => data)
 end
 
 function parse_key_values(key_values)
