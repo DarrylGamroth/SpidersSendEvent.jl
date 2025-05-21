@@ -47,7 +47,7 @@ function offer(p, bufs, max_attempts=10)
     @error "Offer failed"
 end
 
-function myencode(tag::AbstractString, @nospecialize event::Pair{K,V}) where {K<:AbstractString,V}
+function encode_event(tag::AbstractString, @nospecialize event::Pair{K,V}) where {K<:AbstractString,V}
     data = event.second
     buf = zeros(UInt8, 128 + sizeof(data))
     encoder = SpidersMessageCodecs.EventMessageEncoder(buf)
@@ -61,7 +61,7 @@ function myencode(tag::AbstractString, @nospecialize event::Pair{K,V}) where {K<
     convert(AbstractArray{UInt8}, encoder)
 end
 
-function myencode(tag::AbstractString, @nospecialize event::Pair{K,V}) where {K<:AbstractString,V<:AbstractArray}
+function encode_event(tag::AbstractString, @nospecialize event::Pair{K,V}) where {K<:AbstractString,V<:AbstractArray}
     data = event.second
     buf = zeros(UInt8, 128 + ndims(data) * sizeof(Int32) + sizeof(data))
     encoder = SpidersMessageCodecs.TensorMessageEncoder(buf)
@@ -71,10 +71,10 @@ function myencode(tag::AbstractString, @nospecialize event::Pair{K,V}) where {K<
     SpidersMessageCodecs.tag!(header, tag)
     SpidersMessageCodecs.encode(encoder, data)
 
-    myencode(tag, event.first => encoder)
+    encode_event(tag, event.first => encoder)
 end
 
-function myencode(tag::AbstractString, @nospecialize event::Pair{K,V}) where {K<:AbstractString,V<:URI}
+function encode_event(tag::AbstractString, @nospecialize event::Pair{K,V}) where {K<:AbstractString,V<:URI}
     uri = event.second
 
     if endswith(uri.uri, r"\.fits?(.gz)?")
@@ -93,7 +93,37 @@ function myencode(tag::AbstractString, @nospecialize event::Pair{K,V}) where {K<
         error("Unsupported URI scheme: $(uri.scheme)")
     end
 
-    myencode(tag, event.first => data)
+    encode_event(tag, event.first => data)
+end
+
+function encode_tensor(tag::AbstractString, @nospecialize event::Pair{K,V}) where {K<:AbstractString,V<:URI}
+    uri = event.second
+
+    if endswith(uri.uri, r"\.fits?(.gz)?")
+        data = FITS(uri.uri, "r") do hdus
+            read(hdus[1])
+        end
+    elseif uri.scheme == "file"
+        data = open(uri.path, "r") do f
+            read(f)
+        end
+    elseif uri.scheme in ["http", "https", "ftp"]
+        io = IOBuffer()
+        Downloads.download(uri.uri, io)
+        data = take!(io)
+    else
+        error("Unsupported URI scheme: $(uri.scheme)")
+    end
+
+    buf = zeros(UInt8, 128 + ndims(data) * sizeof(Int32) + sizeof(data))
+    encoder = SpidersMessageCodecs.TensorMessageEncoder(buf)
+    header = SpidersMessageCodecs.header(encoder)
+    SpidersMessageCodecs.timestampNs!(header, time_nanos(clock))
+    SpidersMessageCodecs.correlationId!(header, next_id(id_gen))
+    SpidersMessageCodecs.tag!(header, tag)
+    SpidersMessageCodecs.encode(encoder, data)
+
+    convert(AbstractArray{UInt8}, encoder)
 end
 
 function parse_key_values(key_values)
@@ -166,6 +196,9 @@ function (@main)(ARGS)
         help = "SPIDERS Message Tag"
         arg_type = String
         required = true
+        "--tensor"
+        help = "Tensor data to send"
+        action = :store_true
         "key-values"
         help = "Key-Value pairs to send with the event"
         nargs = '+'
@@ -181,17 +214,25 @@ function (@main)(ARGS)
     stream = parse(Int, get(ENV, "STREAM_ID", string(parsed_args["stream"])))
     tag = parsed_args["tag"]
     key_values = parsed_args["key-values"]
+    tensor = get(parsed_args, "tensor", false)
 
+    # Fetch the current time
     fetch!(clock, EpochClock())
 
     kwargs = parse_key_values(key_values)
     if isnothing(kwargs)
         return 0
     end
-
     messages = Vector{UInt8}[]
-    for arg in kwargs
-        push!(messages, myencode(tag, arg))
+
+    if tensor
+        for arg in kwargs
+            push!(messages, encode_tensor(tag, arg))
+        end
+    else
+        for arg in kwargs
+            push!(messages, encode_event(tag, arg))
+        end
     end
 
     Aeron.Context() do context
@@ -226,12 +267,12 @@ end
 
 precompile(parse_key_values, (Vector{String},))
 precompile(main, (Vector{String},))
-precompile(myencode, (String, Pair{SubString{String}, String}))
-precompile(myencode, (String, Pair{SubString{String}, Int}))
-precompile(myencode, (String, Pair{SubString{String}, Float64}))
-precompile(myencode, (String, Pair{SubString{String}, URI}))
-precompile(myencode, (String, Pair{SubString{String}, SpidersMessageCodecs.EventMessageEncoder{Vector{UInt8}, true}}))
-precompile(myencode, (String, Pair{SubString{String}, SpidersMessageCodecs.TensorMessageEncoder{Vector{UInt8}, true}}))
+precompile(encode_event, (String, Pair{SubString{String},String}))
+precompile(encode_event, (String, Pair{SubString{String},Int}))
+precompile(encode_event, (String, Pair{SubString{String},Float64}))
+precompile(encode_event, (String, Pair{SubString{String},URI}))
+precompile(encode_event, (String, Pair{SubString{String},SpidersMessageCodecs.EventMessageEncoder{Vector{UInt8},true}}))
+precompile(encode_event, (String, Pair{SubString{String},SpidersMessageCodecs.TensorMessageEncoder{Vector{UInt8},true}}))
 precompile(is_valid_uri, (String,))
 precompile(offer, (Aeron.Publication, Vector{UInt8}))
 precompile(try_claim, (Aeron.Publication, Int))
