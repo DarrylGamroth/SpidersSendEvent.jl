@@ -5,4 +5,4 @@ $env:STREAM_ID = 2
 $env:BLOCK_ID = 1023
 
 # Run the Julia script
-& "julia" -e "using SpidersSendEvent" -- $args
+& "julia" -e "using SpidersSendMessage" -- $args

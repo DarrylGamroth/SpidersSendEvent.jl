@@ -1,4 +1,4 @@
-module SpidersSendEvent
+module SpidersSendMessage
 
 using Aeron
 using ArgParse

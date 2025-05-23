@@ -7,4 +7,4 @@ export STREAM_ID=2
 export BLOCK_ID=1023
 
 # Run the Julia script
-julia -e "using SpidersSendEvent" -- "$@"
+julia -e "using SpidersSendMessage" -- "$@"
